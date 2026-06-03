@@ -1,0 +1,23 @@
+{
+  "name": "core-service",
+  "version": "1.0.0",
+  "description": "Dịch vụ xử lý nghiệp vụ chính, nhận sự kiện, lọc spam, phân tích AI và áp dụng quy tắc tự động",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.20.0",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "kafkajs": "^2.2.4",
+    "uuid": "^9.0.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.0"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

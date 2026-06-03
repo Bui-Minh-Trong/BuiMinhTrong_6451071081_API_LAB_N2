@@ -1,0 +1,17 @@
+{
+  "name": "fb-api-monorepo",
+  "version": "1.0.0",
+  "description": "Monorepo quản lý Facebook Page phân tán",
+  "scripts": {
+    "install:all": "npm install --prefix webhook-service && npm install --prefix core-service && npm install --prefix backend-api && npm install --prefix retry-service",
+    "dev": "concurrently -k -p \"[{name}]\" -c \"blue,green,yellow,red\" -n \"WEBHOOK,CORE,BACKEND,RETRY\" \"npm run dev --prefix webhook-service\" \"npm run dev --prefix core-service\" \"npm run dev --prefix backend-api\" \"npm run dev --prefix retry-service\"",
+    "start:webhook": "npm run dev --prefix webhook-service",
+    "start:core": "npm run dev --prefix core-service",
+    "start:backend": "npm run dev --prefix backend-api",
+    "start:retry": "npm run dev --prefix retry-service",
+    "stop": "echo \"Để dừng tất cả các dịch vụ, hãy nhấn Ctrl+C trong terminal đang chạy npm run dev.\""
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}
