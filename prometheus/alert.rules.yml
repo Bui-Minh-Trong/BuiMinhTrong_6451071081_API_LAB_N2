@@ -1,0 +1,29 @@
+groups:
+  - name: fb_api_alerts
+    rules:
+      - alert: DeadLetterQueueReceived
+        expr: sum(increase(kafka_topic_partition_current_offset{topic="dead_letter"}[1m])) > 0
+        for: 0m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Dead Letter Queue Received Message"
+          description: "Dead Letter Queue topic (dead_letter) has received a message in the last 1 minute. Offset increased by {{ $value }}."
+
+      - alert: KafkaConsumerLagHigh
+        expr: sum by (consumergroup, topic) (kafka_consumergroup_lag) > 500
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Kafka Consumer Lag High"
+          description: "Consumer group '{{ $labels.consumergroup }}' lag for topic '{{ $labels.topic }}' is {{ $value }}, which is above 500 for the last 2 minutes."
+
+      - alert: WebhookReceiverSilent
+        expr: sum(increase(kafka_topic_partition_current_offset{topic="raw_events"}[10m])) == 0
+        for: 0m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Webhook Receiver Silent"
+          description: "No raw_events messages have been produced to Kafka for the last 10 minutes."
