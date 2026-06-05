@@ -17,8 +17,8 @@ async function saveCommentToDb(command) {
   const commentId = target.comment_id || 'UNKNOWN';
   const replyText = command.reply_text !== undefined ? command.reply_text : (command.payload ? command.payload.reply_text : null);
   const action = command.action || (command.payload && command.payload.action) || 'reply';
-  const sentiment = command.sentiment || 'neutral';
-  const intent = command.intent || 'other';
+  const sentiment = command.sentiment || (command.payload && command.payload.sentiment) || 'neutral';
+  const intent = command.intent || (command.payload && command.payload.intent) || 'other';
 
   // Extract post_id from comment_id if format matches pageid_postid_commentid
   let postId = null;
@@ -131,6 +131,8 @@ async function startConsumer() {
         } else if (action === 'hide') {
           console.log(`[KAFKA-CONSUMER] [command_id: ${commandId}] Calling Facebook Graph API to hide comment: ${commentId}`);
           await facebookApi.hideComment(commentId);
+        } else if (action === 'manual_review' || action === 'pending_review') {
+          console.log(`[KAFKA-CONSUMER] [command_id: ${commandId}] Action is "${action}". Stored for admin review without Graph API call.`);
         } else {
           console.log(`[KAFKA-CONSUMER] [command_id: ${commandId}] Action is "${action}". No Facebook Graph API call needed.`);
         }

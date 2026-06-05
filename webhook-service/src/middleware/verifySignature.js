@@ -3,7 +3,7 @@ require('dotenv').config();
 
 module.exports = (req, res, next) => {
   const signatureHeader = req.headers['x-hub-signature-256'];
-  const appSecret = process.env.APP_SECRET;
+  const appSecret = process.env.APP_SECRET || process.env.FACEBOOK_APP_SECRET;
 
   // If signature verification is not configured or disabled in local dev (optional safety check)
   // we can enforce it as requested: "So sánh chữ ký, trả 403 nếu không khớp"

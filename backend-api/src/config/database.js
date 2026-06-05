@@ -5,7 +5,7 @@ const pool = new Pool({
   host: process.env.DB_HOST || 'localhost',
   port: parseInt(process.env.DB_PORT) || 5432,
   user: process.env.DB_USER || 'fb_api_user',
-  password: process.env.DB_PASS || 'fb_api_password',
+  password: process.env.DB_PASS || process.env.DB_PASSWORD || 'fb_api_password',
   database: process.env.DB_NAME || 'fb_api_db',
   max: 20, // max connection count
   idleTimeoutMillis: 30000,

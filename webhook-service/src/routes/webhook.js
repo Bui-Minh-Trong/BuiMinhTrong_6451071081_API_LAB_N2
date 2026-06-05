@@ -10,7 +10,7 @@ router.get('/webhook', (req, res) => {
   const token = req.query['hub.verify_token'];
   const challenge = req.query['hub.challenge'];
 
-  const verifyToken = process.env.VERIFY_TOKEN;
+  const verifyToken = process.env.VERIFY_TOKEN || process.env.FACEBOOK_VERIFY_TOKEN;
 
   if (mode === 'subscribe' && token === verifyToken) {
     console.log('[WEBHOOK] Webhook successfully verified.');

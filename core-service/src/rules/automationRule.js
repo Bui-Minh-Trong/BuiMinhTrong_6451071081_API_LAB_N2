@@ -1,16 +1,4 @@
-/**
- * Resolves appropriate action and reply content based on processed event characteristics
- * @param {Object} params - Input parameters containing event data and analysis outcomes
- * @param {Object} params.event - The raw event details
- * @param {string} params.intent - Event intent classified by AI or fallback rules
- * @param {string} params.sentiment - Event sentiment classified by AI or fallback rules
- * @param {boolean} params.isSpam - True if flagged as spam
- * @param {boolean} params.isRateLimit - True if flagged as rate-limited
- * @param {string|null} params.reply_suggestion - Suggestion suggested by the AI service
- * @returns {Object} Automation action containing action and reply_text keys
- */
-function applyAutomationRule({ event, intent, sentiment, isSpam, isRateLimit, reply_suggestion }) {
-  // 1. Spam Rule
+function applyAutomationRule({ intent, sentiment, isSpam, isRateLimit, reply_suggestion }) {
   if (isSpam) {
     return {
       action: 'hide',
@@ -18,7 +6,6 @@ function applyAutomationRule({ event, intent, sentiment, isSpam, isRateLimit, re
     };
   }
 
-  // 2. Rate Limit Rule
   if (isRateLimit) {
     return {
       action: 'pending_review',
@@ -26,40 +13,37 @@ function applyAutomationRule({ event, intent, sentiment, isSpam, isRateLimit, re
     };
   }
 
-  // 3. Sentiment Rules (Positive/Negative)
   if (sentiment === 'positive') {
     return {
       action: 'reply',
-      reply_text: 'Cảm ơn bạn đã ủng hộ shop! 🙏'
+      reply_text: 'Cam on ban da ung ho shop!'
     };
   }
 
   if (sentiment === 'negative') {
     return {
       action: 'reply',
-      reply_text: 'Shop rất xin lỗi về trải nghiệm chưa tốt. Shop sẽ liên hệ hỗ trợ bạn ngay!'
+      reply_text: 'Shop rat xin loi vi trai nghiem chua tot. Shop se kiem tra va ho tro ban ngay!'
     };
   }
 
-  // 4. Intent Rules (Price / Complaint)
   if (intent === 'ask_price') {
     return {
       action: 'reply',
-      reply_text: 'Bạn ơi shop sẽ inbox báo giá chi tiết ngay nhé! 😊'
+      reply_text: 'Ban oi shop se inbox bao gia chi tiet ngay nhe!'
     };
   }
 
   if (intent === 'complaint') {
     return {
       action: 'reply',
-      reply_text: 'Shop rất tiếc về vấn đề này. Bạn vui lòng inbox để shop hỗ trợ ngay!'
+      reply_text: 'Shop rat xin loi vi trai nghiem chua tot. Shop se kiem tra va ho tro ban ngay!'
     };
   }
 
-  // 5. Default Action using AI Suggestion
   return {
     action: 'reply',
-    reply_text: reply_suggestion || null
+    reply_text: reply_suggestion || 'Cam on ban da de lai binh luan. Shop se phan hoi ban som!'
   };
 }
 

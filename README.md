@@ -1,181 +1,267 @@
-# Facebook Page Management Distributed System (Monorepo)
+# Facebook Page API & AI Automation Pipeline
 
-Hệ thống quản lý Facebook Page phân tán dạng monorepo sử dụng Node.js (Express), Kafka, PostgreSQL, Prometheus và Alertmanager.
+He thong demo 3 bai lab Lap trinh API:
 
----
+- Bai 1: Backend API proxy toi Facebook Graph API, co Swagger, login JWT, `GET /posts`, `POST /post`, `GET /comments`.
+- Bai 2: Webhook Service nhan event Facebook, verify HMAC, normalize payload va publish Kafka `raw_events`; Core Service classify va publish `reply_commands`/`manual_review`.
+- Bai 3: Automation + Retry + Idempotency + Circuit Breaker + Dead Letter Queue + Prometheus/Alertmanager.
 
-## 1. Cài đặt Hạ tầng (Docker & ngrok)
+## Kien truc service
 
-### Yêu cầu hệ thống
-- Docker Desktop và Docker Compose đã được cài đặt và đang chạy.
-- Node.js >= 18 và npm.
-- ngrok đã được cài đặt để tiếp nhận webhook từ Facebook.
+| Thanh phan | Port | Vai tro |
+| --- | ---: | --- |
+| backend-api | 3000 | Swagger, API Bai 1, consume `reply_commands`/`send_retry`, goi Facebook Graph API |
+| webhook-service | 3001 | Verify webhook, nhan POST `/webhook`, publish `raw_events` |
+| core-service | 3002 | Consume `raw_events`, phan loai intent/sentiment/spam, tao command |
+| retry-service | 3003 | Consume `send_failed`, exponential backoff, publish `send_retry` hoac `dead_letter` |
+| Kafka UI | 18081 | Xem topic/message |
+| Prometheus | 9090 | Metric va alert |
+| Alertmanager | 9093 | Nhan alert |
+| PostgreSQL | 5432 | Luu idempotency va lich su comment |
 
-### Khởi động các dịch vụ hạ tầng
-Từ thư mục gốc `fb_api/`, chạy lệnh sau để khởi động Kafka, Zookeeper, PostgreSQL, Prometheus, Alertmanager và các công cụ hỗ trợ:
+## 1. Fresh pull: cai dependency va tao .env demo
 
-```bash
-docker compose up -d
+Yeu cau may co Node.js 18+, Docker Desktop, Docker Compose va ngrok.
+
+```powershell
+npm install
+npm run setup:fresh
 ```
 
----
+Lenh tren se:
 
-## 2. Tạo Kafka Topics
+- Cai dependency cho 4 service.
+- Tao `.env` demo cho `backend-api`, `webhook-service`, `core-service`, `retry-service`.
+- Mac dinh `MOCK_FACEBOOK_API=true`, nen chay duoc demo khong can token Facebook that.
 
-Chạy các lệnh `docker exec` sau để khởi tạo 5 topic cần thiết trên Kafka broker (`fb_api_kafka`):
+Neu muon tu dien key that, copy tu cac file:
 
-```bash
-# 1. raw_events: Webhook Service -> Core Service
-docker exec -it fb_api_kafka kafka-topics --create --topic raw_events --bootstrap-server localhost:9092 --partitions 3 --replication-factor 1
+- `backend-api/.env.example`
+- `webhook-service/.env.example`
+- `core-service/.env.example`
+- `retry-service/.env.example`
 
-# 2. reply_commands: Core Service -> Backend API
-docker exec -it fb_api_kafka kafka-topics --create --topic reply_commands --bootstrap-server localhost:9092 --partitions 3 --replication-factor 1
+## 2. Chay Docker infrastructure
 
-# 3. send_retry: Retry Service -> Backend API
-docker exec -it fb_api_kafka kafka-topics --create --topic send_retry --bootstrap-server localhost:9092 --partitions 3 --replication-factor 1
+Mo Docker Desktop truoc, sau do chay:
 
-# 4. send_failed: Backend API -> Retry Service
-docker exec -it fb_api_kafka kafka-topics --create --topic send_failed --bootstrap-server localhost:9092 --partitions 3 --replication-factor 1
-
-# 5. dead_letter: Retry Service (DLQ - Không có consumer)
-docker exec -it fb_api_kafka kafka-topics --create --topic dead_letter --bootstrap-server localhost:9092 --partitions 3 --replication-factor 1
+```powershell
+npm run infra:up
+npm run topics:create
 ```
 
-Để kiểm tra danh sách các topic đã tạo:
-```bash
-docker exec -it fb_api_kafka kafka-topics --list --bootstrap-server localhost:9092
+Kafka topics can co:
+
+- `raw_events`
+- `reply_commands`
+- `manual_review`
+- `send_failed`
+- `send_retry`
+- `dead_letter`
+
+Kiem tra:
+
+```powershell
+docker compose ps
 ```
 
----
+Mo UI:
 
-## 3. Tạo bảng cơ sở dữ liệu PostgreSQL
+- Kafka UI: `http://localhost:18081`
+- Prometheus: `http://localhost:9090`
+- Alertmanager: `http://localhost:9093`
 
-Kết nối vào PostgreSQL (`localhost:5432` với DB `fb_api_db`, User `fb_api_user`, Password `fb_api_password`) và chạy đoạn script SQL sau để khởi tạo cấu trúc bảng:
+## 3. Chay ca 4 service
 
-```sql
--- 1. Bảng cấu hình Facebook Page và Access Tokens
-CREATE TABLE IF NOT EXISTS facebook_pages (
-    page_id VARCHAR(255) PRIMARY KEY,
-    name VARCHAR(255) NOT NULL,
-    access_token TEXT NOT NULL,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
--- 2. Bảng lưu trữ sự kiện nhận được từ webhook (Hỗ trợ xử lý Idempotent)
-CREATE TABLE IF NOT EXISTS processed_events (
-    event_id UUID PRIMARY KEY,
-    event_type VARCHAR(50) NOT NULL,
-    source VARCHAR(50) DEFAULT 'facebook',
-    page_id VARCHAR(255) NOT NULL,
-    post_id VARCHAR(255),
-    comment_id VARCHAR(255) UNIQUE,
-    user_id VARCHAR(255),
-    message TEXT,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
--- 3. Bảng lưu trữ lệnh phản hồi và trạng thái thực thi
-CREATE TABLE IF NOT EXISTS reply_commands (
-    command_id UUID PRIMARY KEY,
-    event_id UUID NOT NULL,
-    action VARCHAR(50) NOT NULL, -- 'reply' hoặc 'hide'
-    page_id VARCHAR(255) NOT NULL,
-    comment_id VARCHAR(255) NOT NULL,
-    reply_text TEXT,
-    intent VARCHAR(100), -- 'ask_price', 'complaint', 'compliment', 'spam', 'other'
-    sentiment VARCHAR(50), -- 'positive', 'neutral', 'negative'
-    status VARCHAR(50) DEFAULT 'PENDING', -- 'PENDING', 'SUCCESS', 'FAILED', 'FAILED_DLQ'
-    retry_count INT DEFAULT 0,
-    last_error TEXT,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
+```powershell
+npm run demo:bai3
 ```
 
----
+Health check:
 
-## 4. Cài đặt và Cấu hình Dịch vụ
-
-### Cài đặt Dependencies cho tất cả các Service
-Chạy lệnh sau tại thư mục gốc để tự động cài đặt `npm install` tuần tự cho 4 services:
-```bash
-npm run install:all
+```powershell
+Invoke-RestMethod http://localhost:3000/health
+Invoke-RestMethod http://localhost:3001/health
+Invoke-RestMethod http://localhost:3002/health
+Invoke-RestMethod http://localhost:3003/health
 ```
 
-### Cấu hình biến môi trường (`.env`)
-Mỗi service cần có file `.env` riêng được copy từ `.env.example`. Dưới đây là các cấu hình tối thiểu:
+Swagger Bai 1:
 
-#### **1. webhook-service/.env** (Port 3001)
+```txt
+http://localhost:3000/api-docs
+```
+
+Tai khoan demo Swagger:
+
+```json
+{
+  "username": "admin",
+  "password": "admin123"
+}
+```
+
+## 4. Cau hinh key that trong .env
+
+### `backend-api/.env`
+
 ```env
-PORT=3001
-KAFKA_BOOTSTRAP_SERVERS=localhost:9092
-FACEBOOK_VERIFY_TOKEN=your_verify_token
+PAGE_ID=facebook_page_id_cua_ban
+PAGE_ACCESS_TOKEN=page_access_token_cua_ban
+MOCK_FACEBOOK_API=false
+JWT_SECRET=chuoi_bi_mat_tu_dat
+ADMIN_USER=admin
+ADMIN_PASS=mat_khau_tu_dat
 ```
 
-#### **2. core-service/.env** (Port 3002)
+Khi `MOCK_FACEBOOK_API=false`, Backend API se goi Graph API that.
+
+### `webhook-service/.env`
+
 ```env
-PORT=3002
-KAFKA_BOOTSTRAP_SERVERS=localhost:9092
-DB_HOST=localhost
-DB_PORT=5432
-DB_NAME=fb_api_db
-DB_USER=fb_api_user
-DB_PASSWORD=fb_api_password
+VERIFY_TOKEN=token_tu_dat_de_meta_verify
+FACEBOOK_VERIFY_TOKEN=token_tu_dat_de_meta_verify
+APP_SECRET=facebook_app_secret_cua_ban
+FACEBOOK_APP_SECRET=facebook_app_secret_cua_ban
 ```
 
-#### **3. backend-api/.env** (Port 3000)
+`VERIFY_TOKEN` la chuoi ban tu dat va dien y chang trong Meta Developers. `APP_SECRET` lay trong Facebook App.
+
+### `core-service/.env`
+
+Demo khong can AI key:
+
 ```env
-PORT=3000
-KAFKA_BOOTSTRAP_SERVERS=localhost:9092
-DB_HOST=localhost
-DB_PORT=5432
-DB_NAME=fb_api_db
-DB_USER=fb_api_user
-DB_PASSWORD=fb_api_password
+AI_PROVIDER=FALLBACK
 ```
 
-#### **4. retry-service/.env** (Port 3003)
+Neu dung AI that:
+
 ```env
-PORT=3003
-KAFKA_BOOTSTRAP_SERVERS=localhost:9092
+AI_PROVIDER=GEMINI
+GEMINI_API_KEY=key_cua_ban
 ```
 
----
+hoac:
 
-## 5. Chạy Hệ thống
-
-### Bước 1: Mở cổng tiếp nhận Webhook (ngrok)
-Facebook yêu cầu webhook phải dùng giao thức HTTPS công khai. Chạy ngrok trỏ đến cổng của `webhook-service` (3001):
-```bash
-ngrok http 3001
-```
-Lấy URL dạng `https://xxxx.ngrok-free.app` để đăng ký cấu hình Webhook trên trang nhà phát triển Facebook.
-
-### Bước 2: Khởi chạy tất cả các Service đồng thời
-Tại thư mục gốc `fb_api/`, khởi động cả 4 services cùng lúc thông qua `concurrently`:
-```bash
-npm run dev
+```env
+AI_PROVIDER=ANTHROPIC
+ANTHROPIC_API_KEY=key_cua_ban
 ```
 
-Bạn cũng có thể chạy riêng lẻ từng service nếu cần:
-- Webhook: `npm run start:webhook`
-- Core: `npm run start:core`
-- Backend: `npm run start:backend`
-- Retry: `npm run start:retry`
+### `retry-service/.env`
 
-Để dừng toàn bộ dịch vụ, chỉ cần nhấn `Ctrl+C` trong terminal đang chạy.
+```env
+MAX_RETRY=3
+```
 
----
+## 5. Chay ngrok va cau hinh Meta Webhook
 
-## 6. Địa chỉ truy cập Dashboard Công cụ
+Mo terminal rieng:
 
-| Dịch vụ / Công cụ | URL truy cập | Mô tả |
-| :--- | :--- | :--- |
-| **Kafka UI** | [http://localhost:8080](http://localhost:8080) | Quản lý topics, consumers, và messages |
-| **Prometheus** | [http://localhost:9090](http://localhost:9090) | Truy vấn metrics & giám sát trạng thái alert |
-| **Alertmanager** | [http://localhost:9093](http://localhost:9093) | Nhận, nhóm và điều hướng cảnh báo (Slack, Email) |
-| **Kafka Broker** | `localhost:9092` | Broker endpoint cho ứng dụng kết nối |
-| **PostgreSQL** | `localhost:5432` | Cơ sở dữ liệu lưu cấu hình & lịch sử phản hồi |
-| **Webhook Service** | [http://localhost:3001](http://localhost:3001) | Endpoint tiếp nhận sự kiện Facebook |
-| **Backend API** | [http://localhost:3000](http://localhost:3000) | API quản trị & gửi phản hồi cho Facebook |
+```powershell
+npm run ngrok:webhook
+```
+
+Lay URL HTTPS, vi du:
+
+```txt
+https://abc-123.ngrok-free.app
+```
+
+Trong Meta Developers, cau hinh callback URL:
+
+```txt
+https://abc-123.ngrok-free.app/webhook
+```
+
+Verify token dung gia tri trong `webhook-service/.env`, vi du:
+
+```txt
+demo_verify_token
+```
+
+Test verify local:
+
+```powershell
+Invoke-WebRequest "http://localhost:3001/webhook?hub.mode=subscribe&hub.verify_token=demo_verify_token&hub.challenge=CHALLENGE_OK"
+```
+
+Neu dung, body tra ve:
+
+```txt
+CHALLENGE_OK
+```
+
+## 6. Demo nhanh Bai 2 va Bai 3
+
+Gui webhook gia lap co HMAC:
+
+```powershell
+cd .\webhook-service
+$env:APP_SECRET="demo_app_secret"
+$env:DEMO_MESSAGE="Shop oi gia bao nhieu?"
+npm run demo:send-webhook
+cd ..
+```
+
+Quan sat Kafka UI:
+
+- `raw_events`: event da normalize.
+- `reply_commands`: command `reply`.
+
+Case automation:
+
+```powershell
+cd .\webhook-service
+$env:DEMO_MESSAGE="Bai viet hay qua, shop tu van rat tot"
+npm run demo:send-webhook
+$env:DEMO_MESSAGE="Dich vu te qua, minh cho rat lau"
+npm run demo:send-webhook
+$env:DEMO_MESSAGE="Nhan qua tai http://spam.example"
+npm run demo:send-webhook
+cd ..
+```
+
+Ket qua:
+
+- Khen: `reply_commands`, `sentiment=positive`.
+- Khieu nai: `reply_commands`, `sentiment=negative`.
+- Spam/link: `reply_commands` co `action=hide`, dong thoi `manual_review` co `reason=spam_detected`.
+
+## 7. Demo retry, circuit breaker va DLQ
+
+Sua `backend-api/.env`:
+
+```env
+SIMULATE_FACEBOOK_FAILURES=99
+CIRCUIT_BREAKER_THRESHOLD=2
+```
+
+Restart `npm run demo:bai3`, gui lai comment hoi gia. Quan sat Kafka UI:
+
+- `send_failed`
+- `send_retry`
+- `dead_letter`
+
+Prometheus alert:
+
+```txt
+http://localhost:9090/alerts
+```
+
+Alert `DeadLetterQueueReceived` bat khi topic `dead_letter` tang offset.
+
+## 8. Tat he thong
+
+Dung terminal dang chay service bang `Ctrl+C`, sau do:
+
+```powershell
+npm run infra:down
+```
+
+Neu muon xoa volume PostgreSQL/Prometheus de reset sach:
+
+```powershell
+docker compose down -v
+```

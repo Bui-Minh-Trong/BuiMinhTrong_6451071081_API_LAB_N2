@@ -4,47 +4,64 @@ require('dotenv').config();
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
-const AI_TIMEOUT = parseInt(process.env.AI_TIMEOUT) || 10000;
+const AI_TIMEOUT = parseInt(process.env.AI_TIMEOUT, 10) || 10000;
+const AI_PROVIDER = (process.env.AI_PROVIDER || '').toUpperCase();
 
-let aiMode = 'FALLBACK'; // GEMINI | ANTHROPIC | FALLBACK
+let aiMode = 'FALLBACK';
 let anthropicClient = null;
 
-if (GEMINI_API_KEY && GEMINI_API_KEY !== 'your_gemini_api_key_here') {
+if (AI_PROVIDER === 'FALLBACK') {
+  console.warn('[AI SERVICE] AI_PROVIDER=FALLBACK. Running in rule-based demo mode.');
+} else if (AI_PROVIDER === 'GEMINI' && GEMINI_API_KEY && GEMINI_API_KEY !== 'your_gemini_api_key_here') {
   aiMode = 'GEMINI';
   console.log('[AI SERVICE] Configured to use Google Gemini API.');
-} else if (ANTHROPIC_API_KEY && ANTHROPIC_API_KEY !== 'your_anthropic_api_key_here') {
+} else if (AI_PROVIDER === 'ANTHROPIC' && ANTHROPIC_API_KEY && ANTHROPIC_API_KEY !== 'your_anthropic_api_key_here') {
   aiMode = 'ANTHROPIC';
-  anthropicClient = new Anthropic({
-    apiKey: ANTHROPIC_API_KEY
-  });
+  anthropicClient = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
+  console.log('[AI SERVICE] Configured to use Anthropic Claude API.');
+} else if (!AI_PROVIDER && GEMINI_API_KEY && GEMINI_API_KEY !== 'your_gemini_api_key_here') {
+  aiMode = 'GEMINI';
+  console.log('[AI SERVICE] Configured to use Google Gemini API.');
+} else if (!AI_PROVIDER && ANTHROPIC_API_KEY && ANTHROPIC_API_KEY !== 'your_anthropic_api_key_here') {
+  aiMode = 'ANTHROPIC';
+  anthropicClient = new Anthropic({ apiKey: ANTHROPIC_API_KEY });
   console.log('[AI SERVICE] Configured to use Anthropic Claude API.');
 } else {
-  console.warn('[AI SERVICE] Neither GEMINI_API_KEY nor ANTHROPIC_API_KEY is configured. Running in Fallback (Rule-Based) mode.');
+  console.warn('[AI SERVICE] No AI key configured. Running in fallback rule-based mode.');
 }
 
-/**
- * Perform rule-based fallback analysis on the message
- * @param {string} messageText - The user message content
- * @returns {Object} Standard intent/sentiment analysis result
- */
+function normalizeText(messageText) {
+  return (messageText || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+}
+
 function getFallbackResponse(messageText) {
-  const text = (messageText || '').toLowerCase();
+  const text = normalizeText(messageText);
   let intent = 'other';
   let sentiment = 'neutral';
-  let replySuggestion = 'Cảm ơn bạn đã để lại tin nhắn. Shop sẽ liên hệ hỗ trợ bạn sớm nhất!';
+  let replySuggestion = 'Cam on ban da de lai tin nhan. Shop se lien he ho tro ban som nhat!';
 
-  if (text.includes('giá') || text.includes('bao nhiêu')) {
+  if (text.includes('gia') || text.includes('bao nhieu')) {
     intent = 'ask_price';
     sentiment = 'neutral';
-    replySuggestion = 'Bạn ơi shop sẽ inbox báo giá chi tiết ngay nhé! 😊';
-  } else if (text.includes('tệ') || text.includes('tồi') || text.includes('xấu') || text.includes('chán')) {
+    replySuggestion = 'Ban oi shop se inbox bao gia chi tiet ngay nhe!';
+  } else if (
+    text.includes('te') || text.includes('toi') || text.includes('xau') ||
+    text.includes('chan') || text.includes('lau') || text.includes('khieu nai') ||
+    text.includes('chua nhan') || text.includes('cho rat')
+  ) {
     intent = 'complaint';
     sentiment = 'negative';
-    replySuggestion = 'Shop rất tiếc về vấn đề này. Bạn vui lòng inbox để shop hỗ trợ ngay!';
-  } else if (text.includes('tốt') || text.includes('hay') || text.includes('thích') || text.includes('tuyệt')) {
+    replySuggestion = 'Shop rat xin loi vi trai nghiem chua tot. Shop se kiem tra va ho tro ban ngay!';
+  } else if (
+    text.includes('tot') || text.includes('hay') || text.includes('thich') ||
+    text.includes('tuyet') || text.includes('ung ho')
+  ) {
     intent = 'compliment';
     sentiment = 'positive';
-    replySuggestion = 'Cảm ơn bạn đã ủng hộ shop! 🙏';
+    replySuggestion = 'Cam on ban da ung ho shop!';
   }
 
   return {
@@ -55,34 +72,22 @@ function getFallbackResponse(messageText) {
   };
 }
 
-/**
- * Call Google Gemini REST API using global fetch
- */
 async function callGeminiApi(messageText) {
   const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${GEMINI_API_KEY}`;
-  
+
   const response = await fetch(url, {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json'
-    },
+    headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
       contents: [{
         parts: [{
-          text: `You are an automated Facebook customer service event analyzer. Analyze the customer message and return a JSON object with intent, sentiment, and reply_suggestion fields.
-          
-Supported Values:
-- intent: "ask_price" | "complaint" | "compliment" | "spam" | "other"
-- sentiment: "positive" | "neutral" | "negative"
-- reply_suggestion: Recommended auto-reply response in Vietnamese.
-
-Message to analyze:
-"${messageText}"`
+          text: `Analyze this Facebook customer message and return JSON only with intent, sentiment, reply_suggestion.
+Allowed intent: ask_price, complaint, compliment, spam, other.
+Allowed sentiment: positive, neutral, negative.
+Message: "${messageText}"`
         }]
       }],
-      generationConfig: {
-        responseMimeType: 'application/json'
-      }
+      generationConfig: { responseMimeType: 'application/json' }
     }),
     signal: AbortSignal.timeout(AI_TIMEOUT)
   });
@@ -96,9 +101,6 @@ Message to analyze:
   return JSON.parse(text);
 }
 
-/**
- * Call Anthropic Claude Messages API
- */
 async function callAnthropicApi(messageText) {
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), AI_TIMEOUT);
@@ -107,50 +109,34 @@ async function callAnthropicApi(messageText) {
     const response = await anthropicClient.messages.create({
       model: 'claude-sonnet-4-20250514',
       max_tokens: 1024,
-      system: 'You are an automated Facebook customer service event analyzer. Analyze the customer message and return a JSON object ONLY. Do not write any introduction, commentary, or wrap it in markdown. The response must follow this schema exactly: { "intent": "ask_price|complaint|compliment|spam|other", "sentiment": "positive|neutral|negative", "reply_suggestion": "string" }',
-      messages: [
-        {
-          role: 'user',
-          content: messageText
-        }
-      ]
+      system: 'Return JSON only: { "intent": "ask_price|complaint|compliment|spam|other", "sentiment": "positive|neutral|negative", "reply_suggestion": "string" }',
+      messages: [{ role: 'user', content: messageText }]
     }, { signal: controller.signal });
 
     clearTimeout(timeoutId);
-    const responseText = response.content[0].text.trim();
-
-    let sanitizedText = responseText;
-    if (sanitizedText.startsWith('```')) {
-      sanitizedText = sanitizedText.replace(/^```json\s*/i, '').replace(/```\s*$/, '').trim();
+    let responseText = response.content[0].text.trim();
+    if (responseText.startsWith('```')) {
+      responseText = responseText.replace(/^```json\s*/i, '').replace(/```\s*$/, '').trim();
     }
-    return JSON.parse(sanitizedText);
+    return JSON.parse(responseText);
   } catch (error) {
     clearTimeout(timeoutId);
     throw error;
   }
 }
 
-/**
- * Analyzes raw message using AI API, wrapped inside Circuit Breaker and Timeout limit
- * @param {string} messageText - Raw message content
- * @returns {Promise<Object>} Analyzed intent, sentiment and suggestion response
- */
 async function analyzeMessage(messageText) {
   if (aiMode === 'FALLBACK') {
     return getFallbackResponse(messageText);
   }
 
   const apiTask = async () => {
-    let parsedJson;
-
-    if (aiMode === 'GEMINI') {
-      parsedJson = await callGeminiApi(messageText);
-    } else {
-      parsedJson = await callAnthropicApi(messageText);
-    }
+    const parsedJson = aiMode === 'GEMINI'
+      ? await callGeminiApi(messageText)
+      : await callAnthropicApi(messageText);
 
     if (!parsedJson.intent || !parsedJson.sentiment || !parsedJson.reply_suggestion) {
-      throw new Error('AI Response does not match the required schema fields');
+      throw new Error('AI response does not match required schema fields');
     }
 
     return {
@@ -166,10 +152,8 @@ async function analyzeMessage(messageText) {
     console.log(`[AI SERVICE] [${aiMode}] Analysis result: intent=${result.intent}, sentiment=${result.sentiment}`);
     return result;
   } catch (error) {
-    console.error(`[AI SERVICE] [${aiMode}] AI Analysis failed (${error.message}). Invoking fallback rules...`);
-    const fallback = getFallbackResponse(messageText);
-    console.log(`[AI SERVICE] Fallback outcome: intent=${fallback.intent}, sentiment=${fallback.sentiment}`);
-    return fallback;
+    console.error(`[AI SERVICE] [${aiMode}] AI failed (${error.message}). Invoking fallback rules...`);
+    return getFallbackResponse(messageText);
   }
 }
 

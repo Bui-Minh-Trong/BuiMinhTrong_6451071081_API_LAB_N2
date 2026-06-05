@@ -14,7 +14,8 @@ function errorHandler(err, req, res, next) {
     error: {
       code: errorCode,
       message: errorMessage,
-      details: err.details || null
+      details: err.details || null,
+      retryable: Boolean(err.retryable)
     },
     timestamp: new Date().toISOString()
   });

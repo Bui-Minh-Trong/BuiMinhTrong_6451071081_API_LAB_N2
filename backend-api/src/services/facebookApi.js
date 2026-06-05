@@ -4,12 +4,26 @@ require('dotenv').config();
 
 const BASE_URL = 'https://graph.facebook.com/v19.0';
 const PAGE_ACCESS_TOKEN = process.env.PAGE_ACCESS_TOKEN;
+const MOCK_FACEBOOK_API = process.env.MOCK_FACEBOOK_API === 'true';
+const SIMULATE_FACEBOOK_FAILURES = parseInt(process.env.SIMULATE_FACEBOOK_FAILURES || '0', 10);
+const simulatedFailures = new Map();
 
 // Create Axios Instance
 const fbClient = axios.create({
   baseURL: BASE_URL,
   timeout: 10000
 });
+
+class FacebookApiError extends Error {
+  constructor(code, message, status, details = null, retryable = false) {
+    super(message);
+    this.name = 'FacebookApiError';
+    this.code = code;
+    this.status = status;
+    this.details = details;
+    this.retryable = retryable;
+  }
+}
 
 /**
  * Handle Graph API response error formatting
@@ -21,19 +35,70 @@ function handleFacebookError(error) {
     const status = error.response.status;
     const fbError = error.response.data && error.response.data.error;
     const fbMessage = fbError ? fbError.message : error.message;
+    const details = fbError || error.response.data || null;
 
-    if (status === 401) {
-      return new Error(`[FB_TOKEN_EXPIRED] Page access token is expired or invalid. Details: ${fbMessage}`);
+    if (status === 400 && fbError && fbError.code === 190) {
+      return new FacebookApiError(
+        'FB_TOKEN_EXPIRED',
+        `Page access token is expired or invalid. Details: ${fbMessage}`,
+        401,
+        details,
+        false
+      );
+    }
+    if (status === 401 || status === 403) {
+      return new FacebookApiError(
+        'FB_UNAUTHORIZED',
+        `Facebook API rejected the page token or permissions. Details: ${fbMessage}`,
+        status,
+        details,
+        false
+      );
     }
     if (status === 429 || (fbError && (fbError.code === 4 || fbError.code === 17 || fbError.code === 341))) {
-      return new Error(`[FB_RATE_LIMIT] Facebook API rate limit exceeded. Details: ${fbMessage}`);
+      return new FacebookApiError(
+        'FB_RATE_LIMIT',
+        `Facebook API rate limit exceeded. Details: ${fbMessage}`,
+        429,
+        details,
+        true
+      );
     }
     if (status >= 500) {
-      return new Error(`[FB_SERVER_ERROR] Transient Facebook server error (Status ${status}). Details: ${fbMessage}`);
+      return new FacebookApiError(
+        'FB_SERVER_ERROR',
+        `Transient Facebook server error. Details: ${fbMessage}`,
+        502,
+        details,
+        true
+      );
     }
-    return new Error(`[FB_API_ERROR] Graph API call failed (Status ${status}). Details: ${fbMessage}`);
+    return new FacebookApiError(
+      'FB_API_ERROR',
+      `Graph API call failed. Details: ${fbMessage}`,
+      status,
+      details,
+      false
+    );
   }
-  return error;
+
+  if (error.code === 'ECONNABORTED') {
+    return new FacebookApiError(
+      'FB_TIMEOUT',
+      'Facebook API request timed out',
+      504,
+      null,
+      true
+    );
+  }
+
+  return new FacebookApiError(
+    'FB_NETWORK_ERROR',
+    error.message || 'Unable to reach Facebook API',
+    503,
+    null,
+    true
+  );
 }
 
 /**
@@ -42,6 +107,43 @@ function handleFacebookError(error) {
 async function callApi(config) {
   const startTime = Date.now();
   const token = config.token || PAGE_ACCESS_TOKEN;
+
+  if (MOCK_FACEBOOK_API) {
+    const key = `${config.method}:${config.url}`;
+    const attempt = simulatedFailures.get(key) || 0;
+
+    if (SIMULATE_FACEBOOK_FAILURES > attempt) {
+      simulatedFailures.set(key, attempt + 1);
+      throw new FacebookApiError(
+        'FB_TIMEOUT',
+        `Mock transient Facebook timeout (${attempt + 1}/${SIMULATE_FACEBOOK_FAILURES})`,
+        504,
+        { mock: true, key },
+        true
+      );
+    }
+
+    const duration = Date.now() - startTime;
+    console.log(`[FB API MOCK] ${config.method.toUpperCase()} ${config.url} | Status: 200 | Latency: ${duration}ms`);
+    return {
+      id: `mock_${Date.now()}`,
+      success: true,
+      mock: true,
+      url: config.url,
+      method: config.method,
+      data: config.data || null
+    };
+  }
+
+  if (!token || token === 'your_page_access_token_here') {
+    throw new FacebookApiError(
+      'FB_TOKEN_MISSING',
+      'PAGE_ACCESS_TOKEN is not configured',
+      500,
+      null,
+      false
+    );
+  }
 
   // Append token to params or headers
   config.params = {
@@ -141,5 +243,6 @@ module.exports = {
   hideComment,
   getPosts,
   createPost,
-  getComments
+  getComments,
+  FacebookApiError
 };

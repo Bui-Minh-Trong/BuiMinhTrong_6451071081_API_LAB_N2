@@ -1,5 +1,6 @@
 const express = require('express');
 const authMiddleware = require('../middleware/authMiddleware');
+const { requireRole } = require('../middleware/authMiddleware');
 const facebookApi = require('../services/facebookApi');
 const { pool } = require('../config/database');
 require('dotenv').config();
@@ -8,6 +9,19 @@ const router = express.Router();
 
 // Apply authentication middleware to all routes in this router
 router.use(authMiddleware);
+router.use(requireRole('admin'));
+
+function badRequest(res, message) {
+  return res.status(400).json({
+    success: false,
+    data: null,
+    error: {
+      code: 'BAD_REQUEST',
+      message
+    },
+    timestamp: new Date().toISOString()
+  });
+}
 
 /**
  * GET /posts - Fetch posts from Facebook Page
@@ -17,15 +31,7 @@ router.get('/posts', async (req, res, next) => {
   const pageId = req.query.page_id || process.env.PAGE_ID;
 
   if (!pageId) {
-    return res.status(400).json({
-      success: false,
-      data: null,
-      error: {
-        code: 'BAD_REQUEST',
-        message: 'page_id is required either via query parameter or environment configuration'
-      },
-      timestamp: new Date().toISOString()
-    });
+    return badRequest(res, 'page_id is required either via query parameter or environment configuration');
   }
 
   try {
@@ -51,27 +57,11 @@ router.post('/post', async (req, res, next) => {
   const { message } = req.body;
 
   if (!pageId) {
-    return res.status(400).json({
-      success: false,
-      data: null,
-      error: {
-        code: 'BAD_REQUEST',
-        message: 'page_id is required'
-      },
-      timestamp: new Date().toISOString()
-    });
+    return badRequest(res, 'page_id is required either via query parameter or environment configuration');
   }
 
   if (!message) {
-    return res.status(400).json({
-      success: false,
-      data: null,
-      error: {
-        code: 'BAD_REQUEST',
-        message: 'message field is required in request body'
-      },
-      timestamp: new Date().toISOString()
-    });
+    return badRequest(res, 'message field is required in request body');
   }
 
   try {
@@ -88,21 +78,14 @@ router.post('/post', async (req, res, next) => {
 });
 
 /**
- * GET /comments/:postId - Fetch comments of a specific post from Facebook
+ * GET /comments - Fetch comments of a specific post from Facebook
+ * Query: post_id
  */
-router.get('/comments/:postId', async (req, res, next) => {
-  const { postId } = req.params;
+router.get('/comments', async (req, res, next) => {
+  const { post_id: postId } = req.query;
 
   if (!postId) {
-    return res.status(400).json({
-      success: false,
-      data: null,
-      error: {
-        code: 'BAD_REQUEST',
-        message: 'postId path parameter is required'
-      },
-      timestamp: new Date().toISOString()
-    });
+    return badRequest(res, 'post_id query parameter is required');
   }
 
   try {
@@ -119,10 +102,97 @@ router.get('/comments/:postId', async (req, res, next) => {
 });
 
 /**
+ * GET /comments/:postId - Fetch comments of a specific post from Facebook
+ */
+router.get('/comments/:postId', async (req, res, next) => {
+  const { postId } = req.params;
+
+  if (!postId) {
+    return badRequest(res, 'postId path parameter is required');
+  }
+
+  try {
+    const comments = await facebookApi.getComments(postId);
+    res.status(200).json({
+      success: true,
+      data: comments,
+      error: null,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /comments/:commentId/reply - Send an admin reply through Facebook Graph API
+ * Body: { message }
+ */
+router.post('/comments/:commentId/reply', async (req, res, next) => {
+  const { commentId } = req.params;
+  const { message } = req.body;
+
+  if (!commentId) {
+    return badRequest(res, 'commentId path parameter is required');
+  }
+
+  if (!message) {
+    return badRequest(res, 'message field is required in request body');
+  }
+
+  try {
+    const result = await facebookApi.replyComment(commentId, message);
+    res.status(200).json({
+      success: true,
+      data: result,
+      error: null,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /comments/:commentId/hide - Hide a comment through Facebook Graph API
+ */
+router.post('/comments/:commentId/hide', async (req, res, next) => {
+  const { commentId } = req.params;
+
+  if (!commentId) {
+    return badRequest(res, 'commentId path parameter is required');
+  }
+
+  try {
+    const result = await facebookApi.hideComment(commentId);
+    res.status(200).json({
+      success: true,
+      data: result,
+      error: null,
+      timestamp: new Date().toISOString()
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
  * GET /dashboard/comments - Get processed comments from PostgreSQL with filter and pagination
  * Query: page, limit, status, sentiment
  */
 router.get('/dashboard/comments', async (req, res, next) => {
+  if (process.env.ENABLE_DATABASE === 'false') {
+    return res.status(503).json({
+      success: false,
+      data: null,
+      error: {
+        code: 'DATABASE_DISABLED',
+        message: 'Database features are disabled. Set ENABLE_DATABASE=true to use dashboard history.'
+      },
+      timestamp: new Date().toISOString()
+    });
+  }
+
   const page = parseInt(req.query.page) || 1;
   const limit = parseInt(req.query.limit) || 10;
   const offset = (page - 1) * limit;

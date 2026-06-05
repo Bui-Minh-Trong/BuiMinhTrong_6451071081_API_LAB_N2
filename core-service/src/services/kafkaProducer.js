@@ -62,6 +62,32 @@ async function publishReplyCommand(command) {
   }
 }
 
+async function publishManualReview(command) {
+  const reviewCommand = {
+    ...command,
+    review_id: uuidv4(),
+    reason: command.reason || 'manual_review',
+    created_at: command.created_at || new Date().toISOString()
+  };
+
+  try {
+    await producer.send({
+      topic: 'manual_review',
+      messages: [
+        {
+          key: reviewCommand.target.page_id,
+          value: JSON.stringify(reviewCommand)
+        }
+      ]
+    });
+    console.log(`[KAFKA] Published review_id: ${reviewCommand.review_id} to manual_review`);
+    return reviewCommand;
+  } catch (error) {
+    console.error(`[KAFKA-PRODUCER] Failed to publish review event. Error:`, error.message);
+    throw error;
+  }
+}
+
 /**
  * Gracefully disconnect producer from Kafka broker
  */
@@ -78,5 +104,6 @@ async function disconnectProducer() {
 module.exports = {
   connectProducer,
   publishReplyCommand,
+  publishManualReview,
   disconnectProducer
 };

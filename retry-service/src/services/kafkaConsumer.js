@@ -1,5 +1,5 @@
 const kafka = require('../config/kafka');
-const { publishSendRetry, publishDeadLetter } = require('./kafkaProducer');
+const { publishSendRetry, publishDeadLetter, isCircuitBreakerBlocked } = require('./kafkaProducer');
 require('dotenv').config();
 
 const MAX_RETRY = parseInt(process.env.MAX_RETRY) || 3;
@@ -7,6 +7,15 @@ const MAX_RETRY = parseInt(process.env.MAX_RETRY) || 3;
 const consumer = kafka.consumer({
   groupId: 'retry-service-group'
 });
+
+function calculateDelayMs(failedEvent, retryCount) {
+  const retryAtMs = Date.parse(failedEvent.next_retry_at);
+  if (!Number.isNaN(retryAtMs)) {
+    return Math.max(0, retryAtMs - Date.now());
+  }
+
+  return 1000 * Math.pow(2, retryCount);
+}
 
 /**
  * Connect consumer and start listening to send_failed topic
@@ -49,9 +58,16 @@ async function startConsumer() {
 
       const commandId = failedEvent.command_id;
       const retryCount = failedEvent.retry_count !== undefined ? failedEvent.retry_count : 0;
+      const blockedByCircuitBreaker = isCircuitBreakerBlocked(failedEvent);
+
+      if (failedEvent.retryable === false) {
+        console.warn(`[DLQ] command_id: ${commandId} is non-retryable. Moving directly to dead_letter.`);
+        await publishDeadLetter(failedEvent);
+        return;
+      }
 
       // 1. Calculate Backoff Delay
-      const delayMs = 1000 * Math.pow(2, retryCount);
+      const delayMs = calculateDelayMs(failedEvent, retryCount);
       console.log(`[RETRY] attempt: ${retryCount}, delay: ${delayMs / 1000}s, command_id: ${commandId}`);
 
       // 2. Perform backoff delay waiting
@@ -59,7 +75,7 @@ async function startConsumer() {
 
       try {
         // 3. Evaluate attempt bounds against threshold
-        if (retryCount < MAX_RETRY) {
+        if (retryCount < MAX_RETRY || blockedByCircuitBreaker) {
           await publishSendRetry(failedEvent);
         } else {
           await publishDeadLetter(failedEvent);

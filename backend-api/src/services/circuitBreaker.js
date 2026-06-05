@@ -7,6 +7,17 @@ let state = 'CLOSED'; // State: CLOSED | OPEN | HALF_OPEN
 let failureCount = 0;
 let nextAttemptTime = 0;
 
+class CircuitBreakerOpenError extends Error {
+  constructor(retryAfterMs) {
+    const remainingSeconds = Math.ceil(retryAfterMs / 1000);
+    super(`Facebook API Circuit Breaker is OPEN. Request blocked. Retrying in ${remainingSeconds}s.`);
+    this.name = 'CircuitBreakerOpenError';
+    this.code = 'CIRCUIT_BREAKER_OPEN';
+    this.retryable = true;
+    this.retryAfterMs = retryAfterMs;
+  }
+}
+
 /**
  * Transitions Circuit Breaker state
  * @param {string} newState - The target state
@@ -31,8 +42,7 @@ async function execute(fn) {
     if (now >= nextAttemptTime) {
       changeState('HALF_OPEN');
     } else {
-      const remainingSeconds = Math.ceil((nextAttemptTime - now) / 1000);
-      throw new Error(`Facebook API Circuit Breaker is OPEN. Request blocked. Retrying in ${remainingSeconds}s.`);
+      throw new CircuitBreakerOpenError(nextAttemptTime - now);
     }
   }
 
@@ -48,6 +58,11 @@ async function execute(fn) {
 
     return result;
   } catch (error) {
+    if (error.retryable === false) {
+      console.warn(`[CIRCUIT BREAKER] [FACEBOOK API] Non-retryable error ignored by breaker. Error: ${error.message}`);
+      throw error;
+    }
+
     if (state === 'CLOSED') {
       failureCount++;
       console.warn(`[CIRCUIT BREAKER] [FACEBOOK API] Failure recorded. Count: ${failureCount}/${THRESHOLD}. Error: ${error.message}`);
@@ -67,5 +82,6 @@ async function execute(fn) {
 
 module.exports = {
   execute,
-  getState: () => state
+  getState: () => state,
+  CircuitBreakerOpenError
 };

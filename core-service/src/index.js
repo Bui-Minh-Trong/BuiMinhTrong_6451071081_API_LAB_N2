@@ -3,6 +3,7 @@ require('dotenv').config();
 
 const { connectProducer, disconnectProducer } = require('./services/kafkaProducer');
 const { startConsumer, stopConsumer } = require('./services/kafkaConsumer');
+const { getEvent, listEvents } = require('./services/eventStatusStore');
 
 const app = express();
 const PORT = process.env.PORT || 3002;
@@ -17,6 +18,41 @@ app.get('/health', (req, res) => {
       status: 'ok',
       service: 'core-service'
     },
+    error: null,
+    timestamp: new Date().toISOString()
+  });
+});
+
+app.get('/events', (req, res) => {
+  const items = listEvents();
+  res.status(200).json({
+    success: true,
+    data: {
+      items,
+      total: items.length
+    },
+    error: null,
+    timestamp: new Date().toISOString()
+  });
+});
+
+app.get('/events/:eventId', (req, res) => {
+  const event = getEvent(req.params.eventId);
+  if (!event) {
+    return res.status(404).json({
+      success: false,
+      data: null,
+      error: {
+        code: 'EVENT_NOT_FOUND',
+        message: 'Event was not processed by this core-service instance'
+      },
+      timestamp: new Date().toISOString()
+    });
+  }
+
+  res.status(200).json({
+    success: true,
+    data: event,
     error: null,
     timestamp: new Date().toISOString()
   });

@@ -1,0 +1,382 @@
+Dưới đây là mô tả chi tiết yêu cầu 3 bài để bạn đưa cho AI khác, hoặc dùng làm prompt/báo cáo.
+
+Tổng Quan Dự Án
+Xây dựng hệ thống quản lý Facebook Page dạng phân tán. Hệ thống cho phép backend gọi Facebook Graph API để đọc bài viết, đăng bài, đọc comment, nhận webhook khi có comment thật trên Page, phân loại comment bằng AI hoặc rule fallback, tự động reply/hide comment, xử lý retry khi gọi Facebook thất bại, đưa message lỗi cuối vào Dead Letter Queue và giám sát bằng Prometheus/Alertmanager.
+
+Kiến trúc gồm 4 service chính:
+
+backend-api      port 3000
+webhook-service  port 3001
+core-service     port 3002
+retry-service    port 3003
+Hạ tầng gồm:
+
+Kafka
+Kafka UI
+PostgreSQL
+Prometheus
+Alertmanager
+ngrok
+Facebook Page
+Meta Developer App
+Các Kafka topic:
+
+raw_events
+reply_commands
+manual_review
+send_failed
+send_retry
+dead_letter
+Bài 1: Tích Hợp Facebook API Và Xây Dựng Backend
+Mục tiêu bài 1 là xây dựng một Backend API đóng vai trò trung gian giữa người dùng/dashboard và Facebook Graph API. Frontend hoặc Swagger không được gọi trực tiếp Facebook, mà phải gọi backend của hệ thống.
+
+Backend API chạy ở port 3000.
+
+Yêu cầu chức năng:
+
+GET /posts
+POST /post
+GET /comments
+Chi tiết:
+
+GET /posts dùng để lấy danh sách bài viết của Facebook Page. Backend nhận request từ client, lấy PAGE_ID và PAGE_ACCESS_TOKEN trong .env, sau đó gọi Facebook Graph API endpoint tương ứng để lấy bài viết. Response trả về phải được chuẩn hóa theo format thống nhất.
+
+POST /post dùng để đăng bài mới lên Facebook Page. Client gửi body có message, backend gọi Graph API để đăng bài lên Page. API phải kiểm tra thiếu nội dung, thiếu token, lỗi token, lỗi Facebook API và trả lỗi rõ ràng.
+
+GET /comments dùng để lấy danh sách bình luận của một bài viết. Client truyền post_id, backend gọi Graph API để lấy comment của bài viết đó.
+
+Backend phải có Swagger UI để demo các API. Swagger chạy tại:
+
+http://localhost:3000/api-docs
+Backend cần có xác thực admin bằng JWT. Người dùng login qua:
+
+POST /auth/login
+Sau khi login lấy Bearer token, dùng token đó để gọi các API quản trị như đọc post, đăng post, đọc comment, reply comment, hide comment.
+
+Các biến môi trường cần có trong backend-api/.env:
+
+PORT=3000
+PAGE_ID=facebook_page_id
+PAGE_ACCESS_TOKEN=page_access_token
+JWT_SECRET=secret_tu_dat
+ADMIN_USER=admin
+ADMIN_PASS=admin123
+MOCK_FACEBOOK_API=false
+Kết quả mong đợi bài 1:
+
+Swagger chạy được.
+Login lấy JWT được.
+GET /posts lấy bài viết từ Page thật.
+POST /post đăng bài lên Page thật.
+GET /comments lấy comment từ bài viết thật.
+Backend xử lý lỗi token/lỗi Graph API rõ ràng.
+Bài 2: Webhook Và Kafka Realtime
+Mục tiêu bài 2 là không xử lý comment trực tiếp bằng một API đơn lẻ nữa, mà chuyển sang kiến trúc event-driven dùng Kafka.
+
+Luồng bài 2:
+
+Facebook Page comment thật
+-> Facebook Webhook
+-> webhook-service
+-> Kafka topic raw_events
+-> core-service
+-> Kafka topic reply_commands hoặc manual_review
+webhook-service chạy ở port 3001.
+
+Nhiệm vụ của webhook-service:
+
+Nhận webhook từ Facebook tại endpoint:
+
+GET /webhook
+POST /webhook
+GET /webhook dùng cho Meta verify callback URL. Meta gửi các query:
+
+hub.mode
+hub.verify_token
+hub.challenge
+Nếu hub.verify_token trùng với VERIFY_TOKEN trong .env, service trả lại nguyên hub.challenge.
+
+POST /webhook dùng để nhận event thật khi có comment trên Facebook Page. Service phải xác thực header:
+
+x-hub-signature-256
+bằng APP_SECRET của Facebook App. Nếu chữ ký sai thì trả 403.
+
+Sau khi xác thực đúng, service parse payload Facebook, chuẩn hóa event về schema nội bộ rồi publish vào Kafka topic:
+
+raw_events
+Schema gợi ý của raw_events:
+
+{
+  "schema_version": 1,
+  "event_id": "uuid",
+  "event_type": "comment_created",
+  "source": "facebook",
+  "page_id": "page_id",
+  "post_id": "post_id",
+  "comment_id": "comment_id",
+  "user_id": "facebook_user_id",
+  "message": "Shop oi gia bao nhieu?",
+  "created_at": "2026-06-05T00:00:00.000Z"
+}
+core-service chạy ở port 3002.
+
+Nhiệm vụ của core-service:
+
+Consume Kafka topic:
+
+raw_events
+Sau khi nhận event comment, service xử lý:
+
+1. Deduplicate event theo event_id.
+2. Kiểm tra spam/link.
+3. Kiểm tra rate limit.
+4. Phân loại intent.
+5. Phân tích sentiment.
+6. Áp dụng automation rule.
+7. Publish command sang topic phù hợp.
+Intent cần nhận diện:
+
+ask_price
+complaint
+compliment
+spam
+other
+Sentiment cần nhận diện:
+
+positive
+neutral
+negative
+Ví dụ phân loại:
+
+"Shop oi gia bao nhieu?" -> intent=ask_price, sentiment=neutral
+"Bai viet hay qua, shop tu van rat tot" -> intent=compliment, sentiment=positive
+"Dich vu te qua, minh cho rat lau" -> intent=complaint, sentiment=negative
+"Nhan qua tai http://spam.example" -> spam=true
+Nếu không có AI key thật, hệ thống phải có fallback rule-based để demo ổn định. Nếu có AI key, có thể dùng Gemini hoặc Anthropic.
+
+Core service expose endpoint để xem trạng thái xử lý:
+
+GET http://localhost:3002/events
+GET http://localhost:3002/events/:eventId
+Kết quả mong đợi bài 2:
+
+Meta verify webhook thành công qua ngrok.
+Comment thật trên Page được gửi về webhook-service.
+Webhook chuẩn hóa event và publish raw_events.
+Kafka UI thấy message trong raw_events.
+Core service consume raw_events và phân loại.
+Kafka UI thấy message trong reply_commands hoặc manual_review.
+Bài 3: AI Automation, Retry, Circuit Breaker, Idempotency, Dead Letter
+Mục tiêu bài 3 là hoàn thiện pipeline tự động hóa. Hệ thống không chỉ phân loại comment mà còn tự động quyết định reply/hide, gọi Facebook Graph API, xử lý lỗi tạm thời bằng retry, tránh xử lý trùng bằng idempotency, và đưa lỗi cuối vào Dead Letter Queue.
+
+Luồng bài 3 đầy đủ:
+
+1. Người dùng comment trên Facebook Page.
+2. Facebook gửi webhook về webhook-service.
+3. Webhook chuẩn hóa event và publish vào raw_events.
+4. core-service consume raw_events và phân loại comment.
+5. Nếu là hỏi giá/khen/khiếu nại thì tạo lệnh reply vào reply_commands.
+6. Nếu là spam/link thì tạo lệnh hide comment vào reply_commands và tạo manual_review.
+7. backend-api consume reply_commands và gọi Facebook Graph API.
+8. Nếu gọi Facebook API thành công thì lưu idempotency key.
+9. Nếu lỗi tạm thời thì publish message vào send_failed.
+10. retry-service consume send_failed.
+11. retry-service chờ exponential backoff.
+12. Nếu chưa quá giới hạn retry thì publish sang send_retry.
+13. backend-api consume send_retry và gọi lại Facebook Graph API.
+14. Nếu retry quá giới hạn thì retry-service publish vào dead_letter.
+15. Prometheus phát hiện dead_letter có message mới và kích hoạt alert.
+Automation rule:
+
+ask_price -> reply
+compliment/positive -> reply cảm ơn
+complaint/negative -> reply xin lỗi/hỗ trợ
+spam/link -> hide comment + manual_review
+rate limit -> pending_review/manual_review
+other -> reply mặc định hoặc chờ review
+Schema gợi ý của reply_commands:
+
+{
+  "schema_version": 1,
+  "command_id": "uuid",
+  "event_id": "uuid",
+  "action": "reply",
+  "target": {
+    "page_id": "page_id",
+    "comment_id": "comment_id"
+  },
+  "reply_text": "Ban oi shop se inbox bao gia chi tiet ngay nhe!",
+  "intent": "ask_price",
+  "sentiment": "neutral",
+  "created_at": "2026-06-05T00:00:00.000Z"
+}
+Với spam/link:
+
+{
+  "action": "hide",
+  "target": {
+    "page_id": "page_id",
+    "comment_id": "comment_id"
+  },
+  "intent": "spam",
+  "sentiment": "neutral"
+}
+Đồng thời publish thêm vào manual_review:
+
+{
+  "review_id": "uuid",
+  "event_id": "uuid",
+  "reason": "spam_detected",
+  "action": "hide",
+  "original_event": {}
+}
+backend-api consume:
+
+reply_commands
+send_retry
+Trước khi gọi Facebook Graph API, backend kiểm tra command_id trong bảng idempotency_keys. Nếu command đã xử lý thành công, bỏ qua để tránh reply trùng.
+
+Nếu action là reply, gọi Graph API reply comment:
+
+POST /{comment_id}/comments
+Nếu action là hide, gọi Graph API hide comment:
+
+POST /{comment_id}
+body: is_hidden=true
+Nếu gọi Facebook API lỗi tạm thời như timeout, network error, rate limit, lỗi 5xx, backend publish vào:
+
+send_failed
+Schema gợi ý send_failed:
+
+{
+  "schema_version": 1,
+  "command_id": "uuid",
+  "event_id": "uuid",
+  "retry_count": 0,
+  "retryable": true,
+  "last_error": "Facebook API timeout",
+  "next_retry_at": "2026-06-05T00:00:01.000Z",
+  "payload": {
+    "action": "reply",
+    "target": {
+      "page_id": "page_id",
+      "comment_id": "comment_id"
+    },
+    "reply_text": "..."
+  }
+}
+retry-service chạy ở port 3003.
+
+Nhiệm vụ của retry-service:
+
+Consume:
+
+send_failed
+Đọc retry_count, tính delay:
+
+delay = 1000 * 2^retry_count
+Ví dụ:
+
+retry_count=0 -> chờ 1 giây
+retry_count=1 -> chờ 2 giây
+retry_count=2 -> chờ 4 giây
+Nếu chưa quá MAX_RETRY, publish sang:
+
+send_retry
+Nếu quá giới hạn, publish sang:
+
+dead_letter
+Schema gợi ý dead_letter:
+
+{
+  "schema_version": 1,
+  "command_id": "uuid",
+  "event_id": "uuid",
+  "retry_count": 3,
+  "failed_at": "2026-06-05T00:00:00.000Z",
+  "final_error": "Facebook API timeout after maximum retries",
+  "original_topic": "send_failed",
+  "payload": {}
+}
+Circuit breaker:
+
+Backend API phải có circuit breaker khi gọi Facebook Graph API. Nếu Facebook API lỗi liên tiếp quá ngưỡng, circuit breaker chuyển sang OPEN, tạm thời chặn request tiếp theo. Sau một khoảng timeout, chuyển sang HALF_OPEN để thử lại. Nếu thành công thì CLOSED, nếu lỗi thì mở lại.
+
+Idempotency:
+
+Backend API phải lưu command_id đã xử lý thành công vào PostgreSQL. Nếu Kafka redeliver cùng command, backend kiểm tra thấy command đã SUCCESS thì bỏ qua, không reply/hide lần nữa.
+
+Prometheus/Alertmanager:
+
+Hệ thống có Kafka exporter để Prometheus đọc offset topic. Nếu topic dead_letter tăng offset, alert DeadLetterQueueReceived được kích hoạt. Alertmanager nhận alert để phục vụ vận hành.
+
+Kết quả mong đợi bài 3:
+
+Comment hỏi giá -> hệ thống tự reply.
+Comment khen -> hệ thống reply cảm ơn.
+Comment khiếu nại -> hệ thống reply xin lỗi/hỗ trợ.
+Comment spam/link -> hệ thống hide comment và đưa vào manual_review.
+Nếu Facebook API lỗi tạm thời -> message vào send_failed.
+Retry service publish send_retry theo exponential backoff.
+Sau quá số lần retry -> message vào dead_letter.
+Prometheus hiển thị alert khi dead_letter có message mới.
+Backend không reply trùng nhờ idempotency.
+Circuit breaker mở khi Facebook API lỗi liên tiếp.
+Yêu Cầu Setup Môi Trường
+Các file .env cần có:
+
+backend-api/.env:
+
+PORT=3000
+KAFKA_BROKER=localhost:19092
+DB_HOST=localhost
+DB_PORT=5432
+DB_NAME=fb_api_db
+DB_USER=fb_api_user
+DB_PASSWORD=fb_api_password
+JWT_SECRET=secret_tu_dat
+ADMIN_USER=admin
+ADMIN_PASS=admin123
+PAGE_ID=facebook_page_id
+PAGE_ACCESS_TOKEN=page_access_token
+MOCK_FACEBOOK_API=false
+SIMULATE_FACEBOOK_FAILURES=0
+CIRCUIT_BREAKER_THRESHOLD=5
+CIRCUIT_BREAKER_TIMEOUT=30000
+webhook-service/.env:
+
+PORT=3001
+KAFKA_BROKER=localhost:19092
+VERIFY_TOKEN=verify_token_tu_dat
+FACEBOOK_VERIFY_TOKEN=verify_token_tu_dat
+APP_SECRET=facebook_app_secret
+FACEBOOK_APP_SECRET=facebook_app_secret
+core-service/.env:
+
+PORT=3002
+KAFKA_BROKER=localhost:19092
+AI_PROVIDER=FALLBACK
+GEMINI_API_KEY=optional
+ANTHROPIC_API_KEY=optional
+CIRCUIT_BREAKER_THRESHOLD=5
+CIRCUIT_BREAKER_TIMEOUT=30000
+AI_TIMEOUT=10000
+retry-service/.env:
+
+PORT=3003
+KAFKA_BROKER=localhost:19092
+MAX_RETRY=3
+Lệnh chạy:
+
+npm.cmd install
+npm.cmd run install:all
+npm.cmd run infra:up
+npm.cmd run topics:create
+npm.cmd run demo:bai3
+Terminal khác chạy ngrok:
+
+npm.cmd run ngrok:webhook
+Callback URL trên Meta:
+
+https://ngrok-url/webhook
+Verify token trên Meta phải trùng VERIFY_TOKEN trong webhook-service/.env.

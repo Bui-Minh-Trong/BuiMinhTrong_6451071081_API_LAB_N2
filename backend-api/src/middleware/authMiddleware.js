@@ -53,4 +53,23 @@ function authMiddleware(req, res, next) {
   }
 }
 
+function requireRole(role) {
+  return (req, res, next) => {
+    if (!req.user || req.user.role !== role) {
+      return res.status(403).json({
+        success: false,
+        data: null,
+        error: {
+          code: 'FORBIDDEN',
+          message: `Required role: ${role}`
+        },
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    next();
+  };
+}
+
 module.exports = authMiddleware;
+module.exports.requireRole = requireRole;

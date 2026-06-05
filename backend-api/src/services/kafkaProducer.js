@@ -36,6 +36,11 @@ async function connectProducer() {
  */
 async function publishSendFailed(command, error) {
   const retryCount = command.retry_count !== undefined ? command.retry_count : 0;
+  const errorCode = error.code || 'EXECUTION_ERROR';
+  const retryAfterMs = Number.isFinite(error.retryAfterMs) ? Math.max(0, error.retryAfterMs) : null;
+  const backoffMs = 1000 * Math.pow(2, retryCount);
+  const nextRetryDelayMs = retryAfterMs !== null ? retryAfterMs + 250 : backoffMs;
+  const blockedByCircuitBreaker = errorCode === 'CIRCUIT_BREAKER_OPEN';
   
   // Extract correct fields from either direct command root or nested payload wrapper
   const payloadTarget = command.target || (command.payload && command.payload.target) || { page_id: '', comment_id: '' };
@@ -47,12 +52,18 @@ async function publishSendFailed(command, error) {
     command_id: command.command_id,
     event_id: command.event_id,
     retry_count: retryCount,
+    retryable: error.retryable !== false,
+    error_code: errorCode,
+    blocked_by_circuit_breaker: blockedByCircuitBreaker,
+    retry_after_ms: retryAfterMs,
     last_error: error.message || 'Unknown execution error',
-    next_retry_at: new Date(Date.now() + 1000).toISOString(),
+    next_retry_at: new Date(Date.now() + nextRetryDelayMs).toISOString(),
     payload: {
       action: payloadAction,
       target: payloadTarget,
-      reply_text: payloadReplyText
+      reply_text: payloadReplyText,
+      intent: command.intent || (command.payload && command.payload.intent) || 'other',
+      sentiment: command.sentiment || (command.payload && command.payload.sentiment) || 'neutral'
     }
   };
 

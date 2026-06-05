@@ -9,6 +9,7 @@ const authRouter = require('./routes/auth');
 const postsRouter = require('./routes/posts');
 const healthRouter = require('./routes/health');
 const errorHandler = require('./middleware/errorHandler');
+const { swaggerUi, swaggerSpec } = require('./swagger');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -16,9 +17,13 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 
 // Mount routers
+app.get('/api-docs.json', (req, res) => {
+  res.json(swaggerSpec);
+});
+app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec));
 app.use('/auth', authRouter);
-app.use('/', postsRouter);
 app.use('/', healthRouter); // GET /health is mounted directly
+app.use('/', postsRouter);
 
 // Route fallback for 404
 app.use((req, res, next) => {
@@ -40,14 +45,22 @@ let server;
 
 async function bootstrap() {
   try {
-    // 1. Setup PG schemas and check connection
-    await initializeDatabase();
+    const databaseEnabled = process.env.ENABLE_DATABASE !== 'false';
+    const kafkaEnabled = process.env.ENABLE_KAFKA !== 'false';
 
-    // 2. Connect Kafka producer & consumer
-    await connectProducer();
-    await startConsumer();
+    if (databaseEnabled) {
+      await initializeDatabase();
+    } else {
+      console.warn('[BACKEND-API] Database startup skipped because ENABLE_DATABASE=false.');
+    }
 
-    // 3. Bind HTTP server listener
+    if (kafkaEnabled) {
+      await connectProducer();
+      await startConsumer();
+    } else {
+      console.warn('[BACKEND-API] Kafka startup skipped because ENABLE_KAFKA=false.');
+    }
+
     server = app.listen(PORT, () => {
       console.log(`[BACKEND-API] Server running on port ${PORT}`);
     });
@@ -68,8 +81,10 @@ async function shutdown(signal) {
   }
 
   try {
-    await stopConsumer();
-    await disconnectProducer();
+    if (process.env.ENABLE_KAFKA !== 'false') {
+      await stopConsumer();
+      await disconnectProducer();
+    }
     console.log('[BACKEND-API] Graceful shutdown process completed.');
     process.exit(0);
   } catch (error) {

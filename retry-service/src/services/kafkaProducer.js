@@ -2,6 +2,12 @@ const kafka = require('../config/kafka');
 
 const producer = kafka.producer();
 
+function isCircuitBreakerBlocked(message) {
+  return message.blocked_by_circuit_breaker === true ||
+    message.error_code === 'CIRCUIT_BREAKER_OPEN' ||
+    (typeof message.last_error === 'string' && message.last_error.includes('Circuit Breaker is OPEN'));
+}
+
 /**
  * Connect the Kafka producer with a retry mechanism if the broker is not ready
  */
@@ -34,7 +40,9 @@ async function connectProducer() {
  * @returns {Promise<Object>} The published payload
  */
 async function publishSendRetry(message) {
-  const nextAttemptCount = message.retry_count + 1;
+  const nextAttemptCount = isCircuitBreakerBlocked(message)
+    ? message.retry_count
+    : message.retry_count + 1;
   const nextDelay = 1000 * Math.pow(2, nextAttemptCount);
   const nextRetryTime = new Date(Date.now() + nextDelay).toISOString();
 
@@ -119,5 +127,6 @@ module.exports = {
   connectProducer,
   publishSendRetry,
   publishDeadLetter,
-  disconnectProducer
+  disconnectProducer,
+  isCircuitBreakerBlocked
 };
